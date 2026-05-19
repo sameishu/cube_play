@@ -11,6 +11,7 @@ const state = {
   dims: { ...DEFAULT_DIMS },
   complete: createVolume(DEFAULT_DIMS.h, DEFAULT_DIMS.w, DEFAULT_DIMS.l, true),
   pieces: [],
+  nextPieceId: 1,
   addingPiece: null,
   selectedCompleteLayer: 0,
   analysisLayer: 0,
@@ -20,6 +21,7 @@ const state = {
   transparencyMode: false,
   cameraMode: 'free',
   missingOnlyMode: false,
+  visibleSceneTokens: [],
 };
 
 const runtime = {
@@ -29,7 +31,15 @@ const runtime = {
   numberAnimationId: null,
 };
 
-const SAMPLE_DATA = buildSamples();
+function createPieceRecord({ name, color, shape, volume }) {
+  return {
+    id: state.nextPieceId++,
+    name,
+    color,
+    shape: cloneVolume(shape || volume),
+    volume: cloneVolume(volume),
+  };
+}
 
 mount();
 runtime.refs = captureRefs();
@@ -79,11 +89,7 @@ function mount() {
             <button id="calc-btn" class="primary-btn">计算缺失体</button>
             <div class="secondary-row">
               <button id="reset-btn" class="ghost">重置所有</button>
-              <select id="sample-select">
-                <option value="">加载真题示例</option>
-                <option value="2019国考">2019国考</option>
-                <option value="2018青海">2018青海</option>
-              </select>
+              <button id="toggle-missing-only" class="ghost missing-only-toggle">只显示缺失体</button>
             </div>
           </div>
           <div id="status" class="status info"></div>
@@ -99,7 +105,7 @@ function mount() {
             <button data-view="free">自由视角</button>
           </div>
           <div class="viewport-bottom-left">
-            <button id="toggle-missing-only">只显示缺失体</button>
+            <div id="piece-visibility-panel" class="piece-visibility-panel hidden"></div>
           </div>
           <div id="scene"></div>
         </section>
@@ -151,7 +157,7 @@ function captureRefs() {
     pieceEditor: document.querySelector('#piece-editor'),
     calcBtn: document.querySelector('#calc-btn'),
     resetBtn: document.querySelector('#reset-btn'),
-    sampleSelect: document.querySelector('#sample-select'),
+    toggleMissingOnly: document.querySelector('#toggle-missing-only'),
     status: document.querySelector('#status'),
     scene: document.querySelector('#scene'),
     viewButtons: document.querySelector('#view-buttons'),
@@ -164,7 +170,7 @@ function captureRefs() {
     playAssembly: document.querySelector('#play-assembly'),
     toggleTransparent: document.querySelector('#toggle-transparent'),
     switchSolution: document.querySelector('#switch-solution'),
-    toggleMissingOnly: document.querySelector('#toggle-missing-only'),
+    pieceVisibilityPanel: document.querySelector('#piece-visibility-panel'),
     hintBox: document.querySelector('#hint-box'),
   };
 }
@@ -223,11 +229,22 @@ function setupEvents() {
     setStatus('已重置为默认状态。', 'info');
   });
 
-  refs.sampleSelect.addEventListener('change', () => {
-    const selected = refs.sampleSelect.value;
-    if (!selected) return;
-    loadSample(selected);
-    refs.sampleSelect.value = '';
+  refs.toggleMissingOnly.addEventListener('click', () => {
+    state.missingOnlyMode = !state.missingOnlyMode;
+    if (!state.missingOnlyMode) {
+      setVisibleSceneTokens([]);
+      renderPieceVisibilityPanel();
+      renderLayerView();
+    }
+    renderMissingOnlyButton();
+    refreshScene();
+    if (state.missingOnlyMode && !state.results) {
+      setStatus('当前已切换到只显示缺失体，请先点击“计算缺失体”。', 'info');
+      return;
+    }
+    if (state.missingOnlyMode && state.results?.missingCount === 0) {
+      setStatus('当前没有缺失体，场景中不会显示黄色体块。', 'info');
+    }
   });
 
   refs.layerPrev.addEventListener('click', () => {
@@ -256,15 +273,6 @@ function setupEvents() {
 
   refs.switchSolution.addEventListener('click', switchToNextSolution);
 
-  refs.toggleMissingOnly.addEventListener('click', () => {
-    state.missingOnlyMode = !state.missingOnlyMode;
-    renderMissingOnlyButton();
-    refreshScene();
-    if (state.missingOnlyMode && !state.results?.missingCount) {
-      setStatus('当前仅显示缺失体模式已开启，请先点击“计算缺失体”。', 'info');
-    }
-  });
-
   refs.viewButtons.addEventListener('click', (event) => {
     const button = event.target.closest('button[data-view]');
     if (!button) return;
@@ -289,6 +297,7 @@ function onDimensionsChange() {
   state.dims = { l, w, h };
   state.complete = createVolume(h, w, l, true);
   state.pieces = [];
+  state.nextPieceId = 1;
   state.addingPiece = null;
   state.selectedCompleteLayer = 0;
   state.analysisLayer = 0;
@@ -298,6 +307,7 @@ function onDimensionsChange() {
   state.transparencyMode = false;
   state.cameraMode = 'free';
   state.missingOnlyMode = false;
+  state.visibleSceneTokens = [];
   renderAll();
   refreshScene();
   applyCameraPreset('free', true);
@@ -308,6 +318,7 @@ function resetToDefault() {
   state.dims = { ...DEFAULT_DIMS };
   state.complete = createVolume(DEFAULT_DIMS.h, DEFAULT_DIMS.w, DEFAULT_DIMS.l, true);
   state.pieces = [];
+  state.nextPieceId = 1;
   state.addingPiece = null;
   state.selectedCompleteLayer = 0;
   state.analysisLayer = 0;
@@ -317,35 +328,10 @@ function resetToDefault() {
   state.transparencyMode = false;
   state.cameraMode = 'free';
   state.missingOnlyMode = false;
+  state.visibleSceneTokens = [];
   renderAll();
   refreshScene();
   applyCameraPreset('free', true);
-}
-
-function loadSample(name) {
-  const sample = SAMPLE_DATA[name];
-  if (!sample) return;
-  state.dims = { ...sample.dims };
-  state.complete = cloneVolume(sample.complete);
-  state.pieces = sample.pieces.map((piece) => ({
-    name: piece.name,
-    color: piece.color,
-    shape: cloneVolume(piece.shape || piece.volume),
-    volume: cloneVolume(piece.volume),
-  }));
-  state.addingPiece = null;
-  state.selectedCompleteLayer = 0;
-  state.analysisLayer = 0;
-  state.results = null;
-  state.arrangementSolutions = [];
-  state.arrangementSolutionIndex = -1;
-  state.transparencyMode = false;
-  state.cameraMode = 'free';
-  state.missingOnlyMode = false;
-  renderAll();
-  refreshScene();
-  applyCameraPreset('free', true);
-  setStatus(`已加载示例：${name}。点击“计算缺失体”查看结果。`, 'success');
 }
 
 function renderAll() {
@@ -353,9 +339,10 @@ function renderAll() {
   renderCompleteEditor();
   renderPieceList();
   renderPieceEditor();
+  renderMissingOnlyButton();
+  renderPieceVisibilityPanel();
   renderAnalysisPanel();
   renderViewButtons();
-  renderMissingOnlyButton();
   updateSwitchSolutionButton();
 }
 
@@ -427,10 +414,14 @@ function renderPieceList() {
   refs.pieceList.querySelectorAll('.piece-delete').forEach((button) => {
     button.addEventListener('click', () => {
       const index = Number(button.dataset.index);
-      state.pieces.splice(index, 1);
+      const [removedPiece] = state.pieces.splice(index, 1);
+      setVisibleSceneTokens(
+        state.visibleSceneTokens.filter((token) => token !== getPieceVisibilityToken(removedPiece?.id)),
+      );
       invalidateResults();
       renderPieceList();
       renderPieceEditor();
+      renderPieceVisibilityPanel();
       renderAnalysisPanel();
       refreshScene();
       setStatus('已删除拆分体。', 'info');
@@ -499,7 +490,7 @@ function renderPieceEditor() {
     </div>
     <div class="quick-row">
       <button id="cancel-draft">取消</button>
-      <button id="confirm-draft">确认加入</button>
+      <button id="confirm-draft" class="confirm-draft-btn">确认加入</button>
     </div>
   `;
 
@@ -649,16 +640,19 @@ function renderPieceEditor() {
             placements[draft.selectedPlacementIndex >= 0 ? draft.selectedPlacementIndex : 0].volume,
           )
         : cloneVolume(globalPlacements[0].volume);
-    state.pieces.push({
-      name: draft.name,
-      color: draft.color,
-      shape: cloneVolume(draft.volume),
-      volume: pickedVolume,
-    });
+    state.pieces.push(
+      createPieceRecord({
+        name: draft.name,
+        color: draft.color,
+        shape: cloneVolume(draft.volume),
+        volume: pickedVolume,
+      }),
+    );
     state.addingPiece = null;
     invalidateResults();
     renderPieceList();
     renderPieceEditor();
+    renderPieceVisibilityPanel();
     renderAnalysisPanel();
     refreshScene();
     if (placements.length === 0) {
@@ -689,6 +683,7 @@ function calculateMissing() {
     };
     state.analysisLayer = 0;
     renderFormula(true);
+    renderPieceVisibilityPanel();
     renderLayerView();
     renderHints();
     refreshScene({ animateMissing: emptyEval.missingCount > 0 });
@@ -875,6 +870,7 @@ function applyArrangementSolution(index, animateMissing, resetLayer = false) {
     state.analysisLayer = 0;
   }
   renderPieceList();
+  renderPieceVisibilityPanel();
   renderFormula(animateMissing);
   renderLayerView();
   renderHints();
@@ -943,7 +939,7 @@ function renderLayerView() {
       }
 
       const isMissing = Boolean(state.results?.missing[layer][row][col]);
-      if (isMissing) {
+      if (isMissing && isMissingVisible()) {
         missing += 1;
         cell.classList.add('missing');
       }
@@ -999,6 +995,70 @@ function switchToNextSolution() {
   const next = (state.arrangementSolutionIndex + 1) % state.arrangementSolutions.length;
   applyArrangementSolution(next, true);
   setStatus(`已切换到方案 ${next + 1}/${state.arrangementSolutions.length}。`, 'success');
+}
+
+function renderPieceVisibilityPanel() {
+  const panel = runtime.refs.pieceVisibilityPanel;
+  if (!panel) return;
+
+  setVisibleSceneTokens(state.visibleSceneTokens);
+  const hasMissing = Boolean(state.results?.missingCount);
+  if (state.pieces.length === 0 && !hasMissing) {
+    panel.classList.add('hidden');
+    panel.innerHTML = '';
+    return;
+  }
+
+  const hasFilter = state.visibleSceneTokens.length > 0;
+  panel.classList.remove('hidden');
+  panel.innerHTML = `
+    <div class="piece-visibility-title">场景筛选</div>
+    <div class="piece-visibility-chips">
+      <button class="piece-visibility-chip ${hasFilter ? '' : 'active'}" data-filter="all">全部</button>
+      <button
+        class="piece-visibility-chip ${hasFilter && isMissingVisible() ? 'active' : ''}"
+        data-filter="missing"
+        style="--piece-chip-color:#ffd93d; --piece-chip-tint:${hexToRgba('#ffd93d', 0.2)};"
+        ${hasMissing ? '' : 'disabled'}
+      >
+        <span class="piece-visibility-swatch"></span>
+        <span>缺失体</span>
+      </button>
+      ${state.pieces
+        .map(
+          (piece) => `
+            <button
+              class="piece-visibility-chip ${hasFilter && isPieceVisible(piece.id) ? 'active' : ''}"
+              data-piece-id="${piece.id}"
+              style="--piece-chip-color:${piece.color}; --piece-chip-tint:${hexToRgba(piece.color, 0.15)};"
+              title="${piece.name}"
+            >
+              <span class="piece-visibility-swatch"></span>
+              <span>${piece.name}</span>
+            </button>
+          `,
+        )
+        .join('')}
+    </div>
+  `;
+
+  panel.querySelectorAll('button').forEach((button) => {
+    button.addEventListener('click', () => {
+      if (button.dataset.filter === 'all') {
+        setVisibleSceneTokens([]);
+      } else if (button.dataset.filter === 'missing') {
+        if (!hasMissing) return;
+        toggleSceneToken('missing');
+      } else {
+        const pieceId = Number(button.dataset.pieceId);
+        if (!Number.isFinite(pieceId)) return;
+        toggleSceneToken(getPieceVisibilityToken(pieceId));
+      }
+      renderPieceVisibilityPanel();
+      renderLayerView();
+      refreshScene();
+    });
+  });
 }
 
 function renderMissingOnlyButton() {
@@ -1103,7 +1163,6 @@ function refreshScene(options = {}) {
   const { l, w, h } = state.dims;
   const maxDim = Math.max(l, w, h);
   const showOnlyMissing = state.missingOnlyMode;
-
   if (!showOnlyMissing) {
     const grid = new THREE.GridHelper(maxDim + 4, maxDim + 4, 0xdee2e6, 0xdee2e6);
     grid.position.y = -(h / 2) - 0.55;
@@ -1138,6 +1197,7 @@ function refreshScene(options = {}) {
     });
 
     state.pieces.forEach((piece) => {
+      if (!isPieceVisible(piece.id)) return;
       const pieceMaterial = new THREE.MeshStandardMaterial({
         color: piece.color,
         roughness: 0.4,
@@ -1189,7 +1249,7 @@ function refreshScene(options = {}) {
     }
   }
 
-  if (state.results?.missingCount) {
+  if (state.results?.missingCount && (showOnlyMissing || isMissingVisible())) {
     const missingMaterial = new THREE.MeshStandardMaterial({
       color: 0xffd93d,
       emissive: 0xffd93d,
@@ -1349,7 +1409,51 @@ function invalidateResults() {
   state.results = null;
   state.arrangementSolutions = [];
   state.arrangementSolutionIndex = -1;
+  setVisibleSceneTokens(state.visibleSceneTokens);
+  renderPieceVisibilityPanel();
   updateSwitchSolutionButton();
+}
+
+function getPieceVisibilityToken(pieceId) {
+  return `piece:${pieceId}`;
+}
+
+function setVisibleSceneTokens(tokens) {
+  const validTokens = state.pieces.map((piece) => getPieceVisibilityToken(piece.id));
+  if (state.results?.missingCount) {
+    validTokens.unshift('missing');
+  }
+  const validSet = new Set(validTokens);
+  const uniqueTokens = tokens.filter(
+    (token, index) => validSet.has(token) && tokens.indexOf(token) === index,
+  );
+  state.visibleSceneTokens =
+    uniqueTokens.length === 0 || uniqueTokens.length === validTokens.length ? [] : uniqueTokens;
+}
+
+function toggleSceneToken(token) {
+  if (state.visibleSceneTokens.length === 0) {
+    setVisibleSceneTokens([token]);
+    return;
+  }
+  if (state.visibleSceneTokens.includes(token)) {
+    setVisibleSceneTokens(state.visibleSceneTokens.filter((item) => item !== token));
+    return;
+  }
+  setVisibleSceneTokens([...state.visibleSceneTokens, token]);
+}
+
+function isPieceVisible(pieceId) {
+  return (
+    state.visibleSceneTokens.length === 0 ||
+    state.visibleSceneTokens.includes(getPieceVisibilityToken(pieceId))
+  );
+}
+
+function isMissingVisible() {
+  return Boolean(state.results?.missingCount) && (
+    state.visibleSceneTokens.length === 0 || state.visibleSceneTokens.includes('missing')
+  );
 }
 
 function enumerateDraftPlacements(shapeVolume) {
@@ -1596,6 +1700,7 @@ function getOutsideCount(volume) {
 
 function getPieceColorAt(layer, row, col) {
   for (let i = 0; i < state.pieces.length; i += 1) {
+    if (!isPieceVisible(state.pieces[i].id)) continue;
     if (state.pieces[i].volume[layer][row][col]) return state.pieces[i].color;
   }
   return '';
@@ -1653,106 +1758,9 @@ function countComponents(volume) {
   return components;
 }
 
-function buildSamples() {
-  const sampleA = (() => {
-    const dims = { l: 4, w: 2, h: 3 };
-    const complete = createVolume(dims.h, dims.w, dims.l, true);
-    complete[1][0][0] = false;
-    complete[2][1][3] = false;
-
-    const p1 = volumeFromCoords(dims, [
-      [0, 0, 0],
-      [0, 0, 1],
-      [0, 1, 0],
-      [1, 1, 0],
-      [2, 0, 1],
-    ]);
-
-    const p2 = volumeFromCoords(dims, [
-      [0, 0, 2],
-      [0, 0, 3],
-      [0, 1, 2],
-      [1, 1, 2],
-      [2, 0, 2],
-      [2, 1, 2],
-    ]);
-
-    const p3 = volumeFromCoords(dims, [
-      [0, 1, 1],
-      [1, 0, 1],
-      [1, 0, 2],
-      [2, 0, 0],
-      [2, 1, 1],
-    ]);
-
-    return {
-      dims,
-      complete,
-      pieces: [
-        { name: '拆分体①', color: '#FF6B6B', volume: p1 },
-        { name: '拆分体②', color: '#4ECDC4', volume: p2 },
-        { name: '拆分体③', color: '#45B7D1', volume: p3 },
-      ],
-    };
-  })();
-
-  const sampleB = (() => {
-    const dims = { l: 3, w: 3, h: 3 };
-    const complete = createVolume(dims.h, dims.w, dims.l, true);
-    complete[2][2][2] = false;
-    complete[1][0][2] = false;
-    complete[0][2][0] = false;
-
-    const p1 = volumeFromCoords(dims, [
-      [0, 0, 0],
-      [0, 0, 1],
-      [0, 1, 0],
-      [0, 1, 1],
-      [1, 1, 0],
-      [1, 2, 0],
-      [2, 0, 0],
-      [2, 1, 0],
-    ]);
-
-    const p2 = volumeFromCoords(dims, [
-      [0, 0, 2],
-      [0, 1, 2],
-      [0, 2, 2],
-      [1, 1, 1],
-      [1, 2, 1],
-      [2, 0, 1],
-      [2, 1, 1],
-    ]);
-
-    return {
-      dims,
-      complete,
-      pieces: [
-        { name: '拆分体①', color: '#FF6B6B', volume: p1 },
-        { name: '拆分体②', color: '#4ECDC4', volume: p2 },
-      ],
-    };
-  })();
-
-  return {
-    '2019国考': sampleA,
-    '2018青海': sampleB,
-  };
-}
-
 function voxelToWorld(col, row, layer) {
   const { l, w, h } = state.dims;
   return new THREE.Vector3(col - (l - 1) / 2, layer - (h - 1) / 2, row - (w - 1) / 2);
-}
-
-function volumeFromCoords(dims, coords) {
-  const volume = createVolume(dims.h, dims.w, dims.l, false);
-  coords.forEach(([layer, row, col]) => {
-    if (layer < 0 || row < 0 || col < 0) return;
-    if (layer >= dims.h || row >= dims.w || col >= dims.l) return;
-    volume[layer][row][col] = true;
-  });
-  return volume;
 }
 
 function iterateVoxels(volume, callback) {
