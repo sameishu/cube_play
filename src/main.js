@@ -41,6 +41,34 @@ function createPieceRecord({ name, color, shape, volume }) {
   };
 }
 
+function createPieceDraft({ piece = null, index = -1 } = {}) {
+  if (!piece) {
+    return {
+      name: `拆分体${toCircled(state.pieces.length + 1)}`,
+      color: PALETTE[state.pieces.length % PALETTE.length],
+      volume: createVolume(state.dims.h, state.dims.w, state.dims.l, false),
+      selectedLayer: 0,
+      selectedPlacementIndex: -1,
+      placementCandidates: [],
+      editingPieceId: null,
+      editingPieceIndex: -1,
+      preferredPlacementSignature: null,
+    };
+  }
+
+  return {
+    name: piece.name,
+    color: piece.color,
+    volume: cloneVolume(piece.shape || piece.volume),
+    selectedLayer: findFirstActiveLayer(piece.shape || piece.volume),
+    selectedPlacementIndex: -1,
+    placementCandidates: [],
+    editingPieceId: piece.id,
+    editingPieceIndex: index,
+    preferredPlacementSignature: coordSignature(extractActiveCoords(piece.volume)),
+  };
+}
+
 mount();
 runtime.refs = captureRefs();
 setupEvents();
@@ -133,7 +161,11 @@ function mount() {
             <div class="analysis-actions">
               <button id="play-assembly">播放拼合动画</button>
               <button id="toggle-transparent">切换透明模式</button>
-              <button id="switch-solution">换一个方案</button>
+            </div>
+            <div class="solution-switcher">
+              <button id="prev-solution">上一个方案</button>
+              <div id="solution-index" class="solution-index">方案 0/0</div>
+              <button id="next-solution">下一个方案</button>
             </div>
             <div id="hint-box" class="hint-box">提示：计算后会显示每层缺失位置与总量关系。</div>
           </div>
@@ -169,7 +201,9 @@ function captureRefs() {
     layerStats: document.querySelector('#layer-stats'),
     playAssembly: document.querySelector('#play-assembly'),
     toggleTransparent: document.querySelector('#toggle-transparent'),
-    switchSolution: document.querySelector('#switch-solution'),
+    prevSolution: document.querySelector('#prev-solution'),
+    nextSolution: document.querySelector('#next-solution'),
+    solutionIndex: document.querySelector('#solution-index'),
     pieceVisibilityPanel: document.querySelector('#piece-visibility-panel'),
     hintBox: document.querySelector('#hint-box'),
   };
@@ -209,17 +243,12 @@ function setupEvents() {
     if (state.addingPiece) {
       state.addingPiece = null;
       renderPieceEditor();
+      refreshScene();
       return;
     }
-    state.addingPiece = {
-      name: `拆分体${toCircled(state.pieces.length + 1)}`,
-      color: PALETTE[state.pieces.length % PALETTE.length],
-      volume: createVolume(state.dims.h, state.dims.w, state.dims.l, false),
-      selectedLayer: 0,
-      selectedPlacementIndex: -1,
-      placementCandidates: [],
-    };
+    state.addingPiece = createPieceDraft();
     renderPieceEditor();
+    refreshScene();
   });
 
   refs.calcBtn.addEventListener('click', calculateMissing);
@@ -271,7 +300,8 @@ function setupEvents() {
     refreshScene();
   });
 
-  refs.switchSolution.addEventListener('click', switchToNextSolution);
+  refs.prevSolution.addEventListener('click', switchToPreviousSolution);
+  refs.nextSolution.addEventListener('click', switchToNextSolution);
 
   refs.viewButtons.addEventListener('click', (event) => {
     const button = event.target.closest('button[data-view]');
@@ -343,7 +373,7 @@ function renderAll() {
   renderPieceVisibilityPanel();
   renderAnalysisPanel();
   renderViewButtons();
-  updateSwitchSolutionButton();
+  updateSolutionNavigator();
 }
 
 function renderDimensionInputs() {
@@ -405,16 +435,32 @@ function renderPieceList() {
           <div class="piece-count">方块数：${countVolume(piece.volume)}</div>
         </div>
         <div class="piece-count">${toCircled(index + 1)}</div>
+        <button class="piece-edit" data-index="${index}" title="修改">修改</button>
         <button class="piece-delete" data-index="${index}" title="删除">×</button>
       </div>
     `,
     )
     .join('');
 
+  refs.pieceList.querySelectorAll('.piece-edit').forEach((button) => {
+    button.addEventListener('click', () => {
+      const index = Number(button.dataset.index);
+      const piece = state.pieces[index];
+      if (!piece) return;
+      state.addingPiece = createPieceDraft({ piece, index });
+      renderPieceEditor();
+      refreshScene();
+      setStatus(`正在修改 ${piece.name || `拆分体${toCircled(index + 1)}`}。`, 'info');
+    });
+  });
+
   refs.pieceList.querySelectorAll('.piece-delete').forEach((button) => {
     button.addEventListener('click', () => {
       const index = Number(button.dataset.index);
       const [removedPiece] = state.pieces.splice(index, 1);
+      if (removedPiece?.id === state.addingPiece?.editingPieceId) {
+        state.addingPiece = null;
+      }
       setVisibleSceneTokens(
         state.visibleSceneTokens.filter((token) => token !== getPieceVisibilityToken(removedPiece?.id)),
       );
@@ -438,21 +484,25 @@ function renderPieceEditor() {
   }
 
   const draft = state.addingPiece;
+  const isEditing = draft.editingPieceId !== null;
   const count = countVolume(draft.volume);
-  const placements = enumerateDraftPlacements(draft.volume);
+  const placements = enumerateDraftPlacements(draft.volume, draft.editingPieceId);
   draft.placementCandidates = placements;
 
   if (draft.selectedPlacementIndex >= placements.length) {
     draft.selectedPlacementIndex = placements.length - 1;
   }
   if (draft.selectedPlacementIndex < 0 && placements.length > 0) {
-    draft.selectedPlacementIndex = 0;
+    const preferredIndex = draft.preferredPlacementSignature
+      ? placements.findIndex((placement) => placement.signature === draft.preferredPlacementSignature)
+      : -1;
+    draft.selectedPlacementIndex = preferredIndex >= 0 ? preferredIndex : 0;
   }
   const selectedPlacement =
     draft.selectedPlacementIndex >= 0 ? placements[draft.selectedPlacementIndex] : null;
   const candidateKeysForLayer = getPlacementCellKeysForLayer(placements, draft.selectedLayer);
 
-  refs.addPieceBtn.textContent = '收起编辑器';
+  refs.addPieceBtn.textContent = isEditing ? '结束修改' : '收起编辑器';
   refs.pieceEditor.classList.remove('hidden');
   refs.pieceEditor.innerHTML = `
     <div class="piece-editor-meta">
@@ -482,7 +532,7 @@ function renderPieceEditor() {
     </div>
     <div class="piece-editor-meta">
       <span>可先按形状加入，最终计算时会自动重排位置与方向</span>
-      <span>当前已加入拆分体：${state.pieces.length}</span>
+      <span>${isEditing ? `当前修改对象：第${draft.editingPieceIndex + 1}个` : `当前已加入拆分体：${state.pieces.length}`}</span>
     </div>
     <div class="quick-row">
       <button id="auto-pick-placement">自动选择方案</button>
@@ -490,7 +540,7 @@ function renderPieceEditor() {
     </div>
     <div class="quick-row">
       <button id="cancel-draft">取消</button>
-      <button id="confirm-draft" class="confirm-draft-btn">确认加入</button>
+      <button id="confirm-draft" class="confirm-draft-btn">${isEditing ? '保存修改' : '确认加入'}</button>
     </div>
   `;
 
@@ -521,6 +571,7 @@ function renderPieceEditor() {
       cell.addEventListener('click', () => {
         draft.volume[layer][row][col] = !draft.volume[layer][row][col];
         draft.selectedPlacementIndex = -1;
+        draft.preferredPlacementSignature = null;
         renderPieceEditor();
         refreshScene();
       });
@@ -558,6 +609,7 @@ function renderPieceEditor() {
           return;
         }
         draft.selectedPlacementIndex = index;
+        draft.preferredPlacementSignature = null;
         renderPieceEditor();
         refreshScene();
       });
@@ -576,6 +628,7 @@ function renderPieceEditor() {
   refs.pieceEditor.querySelector('#clear-draft-layer').addEventListener('click', () => {
     draft.volume[draft.selectedLayer] = createLayer(state.dims.w, state.dims.l, false);
     draft.selectedPlacementIndex = -1;
+    draft.preferredPlacementSignature = null;
     renderPieceEditor();
     refreshScene();
   });
@@ -587,6 +640,7 @@ function renderPieceEditor() {
     }
     draft.volume[draft.selectedLayer] = cloneLayer(draft.volume[draft.selectedLayer - 1]);
     draft.selectedPlacementIndex = -1;
+    draft.preferredPlacementSignature = null;
     renderPieceEditor();
     refreshScene();
   });
@@ -597,6 +651,7 @@ function renderPieceEditor() {
       return;
     }
     draft.selectedPlacementIndex = 0;
+    draft.preferredPlacementSignature = null;
     renderPieceEditor();
     refreshScene();
     setStatus(`已自动选择方案 1/${placements.length}。`, 'info');
@@ -612,6 +667,7 @@ function renderPieceEditor() {
         ? 0
         : (draft.selectedPlacementIndex + 1) % placements.length;
     draft.selectedPlacementIndex = next;
+    draft.preferredPlacementSignature = null;
     renderPieceEditor();
     refreshScene();
     setStatus(`已切换到方案 ${next + 1}/${placements.length}。`, 'info');
@@ -640,14 +696,29 @@ function renderPieceEditor() {
             placements[draft.selectedPlacementIndex >= 0 ? draft.selectedPlacementIndex : 0].volume,
           )
         : cloneVolume(globalPlacements[0].volume);
-    state.pieces.push(
-      createPieceRecord({
+    if (isEditing) {
+      const pieceIndex = state.pieces.findIndex((piece) => piece.id === draft.editingPieceId);
+      if (pieceIndex < 0) {
+        setStatus('未找到要修改的拆分体，请重新打开后再试。', 'error');
+        return;
+      }
+      state.pieces[pieceIndex] = {
+        ...state.pieces[pieceIndex],
         name: draft.name,
         color: draft.color,
         shape: cloneVolume(draft.volume),
         volume: pickedVolume,
-      }),
-    );
+      };
+    } else {
+      state.pieces.push(
+        createPieceRecord({
+          name: draft.name,
+          color: draft.color,
+          shape: cloneVolume(draft.volume),
+          volume: pickedVolume,
+        }),
+      );
+    }
     state.addingPiece = null;
     invalidateResults();
     renderPieceList();
@@ -656,9 +727,14 @@ function renderPieceEditor() {
     renderAnalysisPanel();
     refreshScene();
     if (placements.length === 0) {
-      setStatus('拆分体已加入。当前布局暂不可放置，将在计算缺失体时自动重排。', 'info');
+      setStatus(
+        isEditing
+          ? '拆分体已修改。当前布局暂不可放置，将在计算缺失体时自动重排。'
+          : '拆分体已加入。当前布局暂不可放置，将在计算缺失体时自动重排。',
+        'info',
+      );
     } else {
-      setStatus('拆分体已加入。', 'success');
+      setStatus(isEditing ? '拆分体已修改。' : '拆分体已加入。', 'success');
     }
   });
 }
@@ -687,7 +763,7 @@ function calculateMissing() {
     renderLayerView();
     renderHints();
     refreshScene({ animateMissing: emptyEval.missingCount > 0 });
-    updateSwitchSolutionButton();
+    updateSolutionNavigator();
     setStatus(
       `计算完成：完整体${completeCount}，已占0，缺失${emptyEval.missingCount}。`,
       'success',
@@ -695,7 +771,7 @@ function calculateMissing() {
     return;
   }
 
-  const solutions = findArrangementSolutions({ limit: 14, budget: 160000 });
+  const solutions = findArrangementSolutions();
   if (solutions.length === 0) {
     setStatus('未找到满足约束的方案：请调整拆分体形状后重试。', 'error');
     return;
@@ -714,7 +790,7 @@ function calculateMissing() {
     message = `已自动重排拆分体的位置与方向。${message}`;
   }
   if (state.arrangementSolutions.length > 1) {
-    message += ` 可点击“换一个方案”切换（共${state.arrangementSolutions.length}种）。`;
+    message += ` 可点击“上一个方案/下一个方案”切换（共${state.arrangementSolutions.length}种）。`;
   }
   setStatus(message, 'success');
 }
@@ -760,27 +836,28 @@ function evaluateMissingFromOccupiedSet(occupiedSet) {
   return { missing, occupiedCount, missingCount, components };
 }
 
-function findArrangementSolutions({ limit = 10, budget = 120000 } = {}) {
+function findArrangementSolutions() {
   const totalPieces = state.pieces.length;
   if (totalPieces === 0) return [];
 
   const shapes = state.pieces.map((piece) => cloneVolume(piece.shape || piece.volume));
   const currentSignatures = state.pieces.map((piece) => coordSignature(extractActiveCoords(piece.volume)));
   const currentArrangementSignature = currentSignatures.join('||');
+  const placementsByPiece = shapes.map((shape) =>
+    enumerateShapePlacements(shape, new Set(), { includeVolume: false }).map((candidate) => ({
+      ...candidate,
+      keys: candidate.coords.map(([col, row, layer]) => cellKey(layer, row, col)),
+    })),
+  );
   const assigned = Array(totalPieces).fill(null);
   const occupied = new Set();
   const used = Array(totalPieces).fill(false);
-  const searchBudget = { left: budget };
   const solutionsByMissing = new Map();
 
-  const canFitAll = shapes.every(
-    (shape) => enumerateShapePlacements(shape, new Set(), { includeVolume: false }).length > 0,
-  );
+  const canFitAll = placementsByPiece.every((placements) => placements.length > 0);
   if (!canFitAll) return [];
 
   const dfs = (depth) => {
-    if (searchBudget.left <= 0 || solutionsByMissing.size >= limit) return;
-    searchBudget.left -= 1;
     if (depth === totalPieces) {
       const missingStats = evaluateMissingFromOccupiedSet(occupied);
       if (missingStats.missingCount > 0 && missingStats.components !== 1) return;
@@ -796,6 +873,7 @@ function findArrangementSolutions({ limit = 10, budget = 120000 } = {}) {
         occupiedCount: missingStats.occupiedCount,
         missingCount: missingStats.missingCount,
         components: missingStats.components,
+        missingSignature,
         arrangementSignature,
         changed: arrangementSignature !== currentArrangementSignature,
       });
@@ -806,7 +884,7 @@ function findArrangementSolutions({ limit = 10, budget = 120000 } = {}) {
     let pickedCandidates = null;
     for (let i = 0; i < totalPieces; i += 1) {
       if (used[i]) continue;
-      const candidates = enumerateShapePlacements(shapes[i], occupied, { includeVolume: false });
+      const candidates = placementsByPiece[i].filter((candidate) => isPlacementAvailable(candidate, occupied));
       if (candidates.length === 0) return;
       if (pickedPiece < 0 || candidates.length < pickedCandidates.length) {
         pickedPiece = i;
@@ -819,21 +897,17 @@ function findArrangementSolutions({ limit = 10, budget = 120000 } = {}) {
     pickedCandidates.sort((a, b) => {
       const aScore = a.signature === preferred ? 1 : 0;
       const bScore = b.signature === preferred ? 1 : 0;
-      return bScore - aScore;
+      if (aScore !== bScore) return bScore - aScore;
+      return a.signature.localeCompare(b.signature);
     });
 
     used[pickedPiece] = true;
     for (let i = 0; i < pickedCandidates.length; i += 1) {
-      if (solutionsByMissing.size >= limit) break;
       const candidate = pickedCandidates[i];
       assigned[pickedPiece] = candidate.coords;
-      candidate.coords.forEach(([col, row, layer]) => {
-        occupied.add(cellKey(layer, row, col));
-      });
+      candidate.keys.forEach((key) => occupied.add(key));
       dfs(depth + 1);
-      candidate.coords.forEach(([col, row, layer]) => {
-        occupied.delete(cellKey(layer, row, col));
-      });
+      candidate.keys.forEach((key) => occupied.delete(key));
       assigned[pickedPiece] = null;
     }
     used[pickedPiece] = false;
@@ -844,6 +918,9 @@ function findArrangementSolutions({ limit = 10, budget = 120000 } = {}) {
   return [...solutionsByMissing.values()].sort((a, b) => {
     if (a.changed !== b.changed) return a.changed ? 1 : -1;
     if (a.missingCount !== b.missingCount) return a.missingCount - b.missingCount;
+    if (a.missingSignature !== b.missingSignature) {
+      return a.missingSignature.localeCompare(b.missingSignature);
+    }
     return a.arrangementSignature.localeCompare(b.arrangementSignature);
   });
 }
@@ -875,7 +952,7 @@ function applyArrangementSolution(index, animateMissing, resetLayer = false) {
   renderLayerView();
   renderHints();
   refreshScene({ animateMissing: animateMissing && solution.missingCount > 0 });
-  updateSwitchSolutionButton();
+  updateSolutionNavigator();
 }
 
 function renderAnalysisPanel() {
@@ -973,28 +1050,39 @@ function renderViewButtons() {
   });
 }
 
-function updateSwitchSolutionButton() {
-  const button = runtime.refs.switchSolution;
-  if (!button) return;
+function updateSolutionNavigator() {
+  const { prevSolution, nextSolution, solutionIndex } = runtime.refs;
+  if (!prevSolution || !nextSolution || !solutionIndex) return;
   const total = state.arrangementSolutions.length;
   const current = state.arrangementSolutionIndex >= 0 ? state.arrangementSolutionIndex + 1 : 0;
+  solutionIndex.textContent = `方案 ${current}/${total || 0}`;
   if (total <= 1) {
-    button.textContent = '换一个方案';
-    button.disabled = true;
+    prevSolution.disabled = true;
+    nextSolution.disabled = true;
     return;
   }
-  button.textContent = `换一个方案 (${current}/${total})`;
-  button.disabled = false;
+  prevSolution.disabled = false;
+  nextSolution.disabled = false;
+}
+
+function switchToPreviousSolution() {
+  switchArrangementSolution(-1);
 }
 
 function switchToNextSolution() {
+  switchArrangementSolution(1);
+}
+
+function switchArrangementSolution(step) {
   if (state.arrangementSolutions.length <= 1) {
     setStatus('当前没有可切换的其他方案。', 'info');
     return;
   }
-  const next = (state.arrangementSolutionIndex + 1) % state.arrangementSolutions.length;
+  const total = state.arrangementSolutions.length;
+  const current = state.arrangementSolutionIndex >= 0 ? state.arrangementSolutionIndex : 0;
+  const next = (current + step + total) % total;
   applyArrangementSolution(next, true);
-  setStatus(`已切换到方案 ${next + 1}/${state.arrangementSolutions.length}。`, 'success');
+  setStatus(`已切换到方案 ${next + 1}/${total}。`, 'success');
 }
 
 function renderPieceVisibilityPanel() {
@@ -1197,6 +1285,7 @@ function refreshScene(options = {}) {
     });
 
     state.pieces.forEach((piece) => {
+      if (state.addingPiece?.editingPieceId === piece.id) return;
       if (!isPieceVisible(piece.id)) return;
       const pieceMaterial = new THREE.MeshStandardMaterial({
         color: piece.color,
@@ -1411,7 +1500,7 @@ function invalidateResults() {
   state.arrangementSolutionIndex = -1;
   setVisibleSceneTokens(state.visibleSceneTokens);
   renderPieceVisibilityPanel();
-  updateSwitchSolutionButton();
+  updateSolutionNavigator();
 }
 
 function getPieceVisibilityToken(pieceId) {
@@ -1456,8 +1545,15 @@ function isMissingVisible() {
   );
 }
 
-function enumerateDraftPlacements(shapeVolume) {
-  return enumerateShapePlacements(shapeVolume, getOccupiedCellSet(), { includeVolume: true });
+function enumerateDraftPlacements(shapeVolume, excludedPieceId = null) {
+  return enumerateShapePlacements(shapeVolume, getOccupiedCellSet(excludedPieceId), { includeVolume: true });
+}
+
+function isPlacementAvailable(candidate, occupiedSet) {
+  for (let i = 0; i < candidate.keys.length; i += 1) {
+    if (occupiedSet.has(candidate.keys[i])) return false;
+  }
+  return true;
 }
 
 function enumerateShapePlacements(shapeVolume, occupiedSet, options = {}) {
@@ -1537,6 +1633,15 @@ function getPlacementCellKeysForLayer(placements, layer) {
   return keys;
 }
 
+function findFirstActiveLayer(volume) {
+  for (let layer = 0; layer < volume.length; layer += 1) {
+    if (countLayer(volume[layer]) > 0) {
+      return layer;
+    }
+  }
+  return 0;
+}
+
 function extractActiveCoords(volume) {
   const coords = [];
   iterateVoxels(volume, (layer, row, col) => {
@@ -1595,9 +1700,10 @@ function buildUniqueOrientedCoords(baseCoords) {
   return variants;
 }
 
-function getOccupiedCellSet() {
+function getOccupiedCellSet(excludedPieceId = null) {
   const occupied = new Set();
   state.pieces.forEach((piece) => {
+    if (piece.id === excludedPieceId) return;
     iterateVoxels(piece.volume, (layer, row, col) => {
       occupied.add(cellKey(layer, row, col));
     });
